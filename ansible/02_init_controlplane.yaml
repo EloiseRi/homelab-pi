@@ -1,0 +1,87 @@
+- name: Initialize control-plane node
+  hosts: control_plane
+  become: true
+  tasks:
+    - name: Check if Kubernetes is already initialized
+      stat:
+        path: /home/{{ ansible_user }}/.kube/config
+      register: kubeadm_init_done
+
+    - name: Initialize Kubernetes cluster
+      command: >
+        kubeadm init
+        --pod-network-cidr=10.42.0.0/16
+        --apiserver-advertise-address={{ ansible_default_ipv4.address }}
+      when: not kubeadm_init_done.stat.exists
+      register: kubeadm_init
+
+    - name: Create .kube directory for the user
+      file:
+        path: /home/{{ ansible_user }}/.kube
+        state: directory
+        mode: '0700'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+
+    - name: Copy admin.conf to user's kubeconfig
+      copy:
+        src: /etc/kubernetes/admin.conf
+        dest: /home/{{ ansible_user }}/.kube/config
+        remote_src: yes
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0600'
+
+    - name: Generate kubeadm join command
+      command: kubeadm token create --print-join-command
+      register: kubeadm_join_command_raw
+      run_once: true
+      when: kubeadm_init is succeeded or kubeadm_init_done.stat.exists
+
+    - name: Set kubeadm join command fact for all hosts
+      set_fact:
+        kubeadm_join_command: "{{ kubeadm_join_command_raw.stdout }}"
+
+
+- name: Deploy Calico CNI via k8s module
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+
+  tasks:
+    - name: Fetch admin.conf to local kubeconfig
+      fetch:
+        src: /etc/kubernetes/admin.conf
+        dest: "{{ lookup('env','HOME') }}/.kube/config"
+        flat: yes
+
+    - name: Apply Calico CRDs
+      k8s:
+        state: present
+        src: https://raw.githubusercontent.com/projectcalico/calico/v3.30.2/manifests/operator-crds.yaml
+        kubeconfig: "{{ lookup('env','HOME') }}/.kube/config"
+
+    - name: Apply Tigera Operator
+      k8s:
+        state: present
+        src: https://raw.githubusercontent.com/projectcalico/calico/v3.30.2/manifests/tigera-operator.yaml
+        kubeconfig: "{{ lookup('env','HOME') }}/.kube/config"
+
+    - name: Download Calico custom resources
+      get_url:
+        url: https://raw.githubusercontent.com/projectcalico/calico/v3.30.2/manifests/custom-resources.yaml
+        dest: /tmp/custom-resources.yaml
+        mode: '0644'
+
+    - name: Patch pod CIDR in Calico custom-resources
+      lineinfile:
+        path: /tmp/custom-resources.yaml
+        regexp: '^\s*cidr:.*$'
+        line: '      cidr: 10.42.0.0/16'
+
+    - name: Apply Calico custom-resources
+      k8s:
+        state: present
+        src: /tmp/custom-resources.yaml
+        kubeconfig: "{{ lookup('env','HOME') }}/.kube/config"

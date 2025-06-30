@@ -1,0 +1,88 @@
+- hosts: all
+  become: yes
+  tasks:
+
+    - name: Delete Calico Kubernetes resources BEFORE reset
+      shell: |
+        kubectl delete -f https://docs.projectcalico.org/manifests/calico.yaml --ignore-not-found
+        kubectl delete daemonset calico-node -n kube-system --ignore-not-found --force --grace-period=0
+        kubectl delete deployment calico-kube-controllers -n kube-system --ignore-not-found --force --grace-period=0
+        kubectl delete configmap calico-config -n kube-system --ignore-not-found --force --grace-period=0
+        kubectl delete clusterrolebinding calico-node --ignore-not-found
+        kubectl delete clusterrolebinding calico-kube-controllers --ignore-not-found
+        kubectl delete clusterrole calico-node --ignore-not-found
+        kubectl delete clusterrole calico-kube-controllers --ignore-not-found
+        kubectl delete serviceaccount calico-node -n kube-system --ignore-not-found
+        kubectl delete serviceaccount calico-kube-controllers -n kube-system --ignore-not-found
+      args:
+        warn: false
+      ignore_errors: yes
+
+    - name: Stop kubelet
+      systemd:
+        name: kubelet
+        state: stopped
+
+    - name: Reset Kubernetes cluster on the node
+      shell: kubeadm reset -f
+      ignore_errors: yes
+
+    - name: Remove CNI network config directory
+      file:
+        path: /etc/cni/net.d
+        state: absent
+
+    - name: Remove kubelet data directory
+      file:
+        path: /var/lib/kubelet
+        state: absent
+
+    - name: Remove Kubernetes manifests directory
+      file:
+        path: /etc/kubernetes
+        state: absent
+
+    - name: Remove etcd data directory
+      file:
+        path: /var/lib/etcd
+        state: absent
+
+    - name: Delete Calico network interfaces
+      shell: |
+        ip link show | grep -o 'cali[^:]\\+' | xargs -r -n1 ip link delete
+      ignore_errors: yes
+
+    - name: Delete common CNI interfaces if exist
+      shell: |
+        ip link delete cni0 || true
+        ip link delete flannel.1 || true
+      ignore_errors: yes
+
+    - name: Flush iptables rules only (keep routes)
+      shell: |
+        iptables -F
+        iptables -t nat -F
+        iptables -t mangle -F
+        iptables -X
+      ignore_errors: yes
+
+    - name: Remove Calico directories
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/lib/calico
+        - /etc/calico
+        - /var/log/calico
+
+    - name: Restart containerd
+      systemd:
+        name: containerd
+        state: restarted
+        enabled: yes
+
+    - name: Restart kubelet
+      systemd:
+        name: kubelet
+        state: restarted
+        enabled: yes

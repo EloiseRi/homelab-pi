@@ -1,0 +1,17 @@
+all:
+  hosts:
+    master:
+      ansible_host:
+    worker1:
+      ansible_host:
+    worker2:
+      ansible_host:
+    
+  children:
+    masters:
+      hosts:
+        master:
+    workers:
+      hosts:
+        worker1:
+        worker2:

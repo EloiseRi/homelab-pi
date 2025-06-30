@@ -1,0 +1,157 @@
+- hosts: all
+  become: true
+  tasks:
+    - name: Ensure network ipv4 forwarding is enabled
+      sysctl:
+        name: net.ipv4.ip_forward
+        value: '1'
+        state: present
+        reload: yes
+
+    - name: Ensure network ipv4 forwarding is enabled
+      sysctl:
+        name: net.bridge.bridge-nf-call-iptables
+        value: '1'
+        state: present
+        reload: yes
+
+    - name: Deactivate swap
+      command: swapoff -a
+      ignore_errors: yes
+      when: ansible_swaptotal_mb > 0
+
+    - name: Ensure swap is disabled in fstab
+      lineinfile:
+        path: /etc/fstab
+        regexp: '^([^#].*swap)'
+        line: '#\\1'
+
+    - name: Ensure required packages are installed
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+        state: present
+        update_cache: yes
+
+    - name: Create apt keyring directory
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Download the public signing key for Kubernetes
+      get_url:
+        url: https://pkgs.k8s.io/core:/stable:/v1.33/deb/Release.key
+        dest: /etc/apt/keyrings/kubernetes-apt-keyring.asc
+        mode: '0644'
+
+    - name: Add Kubernetes apt repository
+      deb822_repository:
+        name: Kubernetes
+        types: deb
+        uris: 
+          - https://pkgs.k8s.io/core:/stable:/v1.33/deb/
+        suites:
+          - /
+        signed_by: /etc/apt/keyrings/kubernetes-apt-keyring.asc
+      register: kubernetes_repository
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+
+    - name: Install Kubernetes components
+      apt:
+        name:
+          - kubelet
+          - kubeadm
+          - kubectl
+          - containerd
+        state: present
+
+    - name: Set SystemdCgroup to true in containerd config
+      lineinfile:
+        path: /etc/containerd/config.toml
+        regexp: '^(\s*)SystemdCgroup\s*='
+        line: '\1SystemdCgroup = true'
+        backrefs: yes
+
+- hosts: controlplane
+  become: true
+  tasks:
+    - name: Check if Kubernetes is already initialized
+      stat:
+        path: /home/{{ ansible_user }}/.kube/config
+      register: kubeadm_init_done
+
+    - name: Initialize Kubernetes cluster
+      command: kubeadm init --pod-network-cidr=10.42.0.0/16 --apiserver-advertise-address={{ ansible_default_ipv4.address }}
+      when: not kubeadm_init_done.stat.exists
+      register: kubeadm_init
+
+    - name: Create .kube directory for the user
+      file:
+        path: /home/{{ ansible_user }}/.kube
+        state: directory
+        mode: '0755'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+
+    - name: Copy admin.conf to user's kube config
+      copy:
+        src: /etc/kubernetes/admin.conf
+        dest: /home/{{ ansible_user }}/.kube/config
+        remote_src: yes
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0644'
+
+    - name: Generate kubeadm join command
+      command: kubeadm token create --print-join-command
+      register: kubeadm_join_command_raw
+      run_once: true
+      when: kubeadm_init is succeeded or kubeadm_init_done.stat.exists
+
+    - name: Set kubeadm join command fact for all hosts
+      set_fact:
+        kubeadm_join_command: "{{ kubeadm_join_command_raw.stdout }}"
+
+    - name: Install Calico network plugin
+      command: kubectl apply -f https://docs.projectcalico.org/manifests/calico.yaml
+      when: kubeadm_init is succeeded or kubeadm_init_done.stat.exists
+      environment:
+        KUBECONFIG: /home/{{ ansible_user }}/.kube/config
+
+- hosts: workers
+  become: true
+  tasks:
+    - name: Create .kube directory for the user
+      file:
+        path: /home/{{ ansible_user }}/.kube
+        state: directory
+        mode: '0755'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+
+    - name: Copy admin.conf from control-plane to worker node
+      fetch:
+        src: /etc/kubernetes/admin.conf
+        dest: /tmp/admin.conf
+        flat: yes
+      delegate_to: controlplane
+      run_once: true
+
+    - name: Copy admin.conf to user's kube config
+      copy:
+        src: /tmp/admin.conf
+        dest: /home/{{ ansible_user }}/.kube/config
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0644'
+
+    - name: Join worker node to the cluster
+      command: "{{ hostvars['controlplane']['kubeadm_join_command'] }}"
+      when: hostvars['controlplane']['kubeadm_join_command'] is defined

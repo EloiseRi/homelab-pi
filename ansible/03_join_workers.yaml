@@ -1,0 +1,51 @@
+- name: Join worker nodes
+  hosts: workers
+  become: true
+  tasks:
+    - name: Create .kube directory for the user
+      file:
+        path: /home/{{ ansible_user }}/.kube
+        state: directory
+        mode: '0700'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+
+    - name: Copy admin.conf from control_plane to worker node
+      fetch:
+        src: /etc/kubernetes/admin.conf
+        dest: /tmp/admin.conf
+        flat: yes
+      delegate_to: control_plane
+      run_once: true
+
+    - name: Copy admin.conf to user's kubeconfig
+      copy:
+        src: /tmp/admin.conf
+        dest: /home/{{ ansible_user }}/.kube/config
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0600'
+
+    - name: Check if node already joined
+      stat:
+        path: /etc/kubernetes/kubelet.conf
+      register: kubelet_conf
+
+    - name: Join worker node to the cluster
+      command: "{{ hostvars['control_plane']['kubeadm_join_command'] }}"
+      args:
+        creates: /etc/kubernetes/kubelet.conf
+
+- name: Wait for all nodes to be Ready
+  hosts: control_plane
+  gather_facts: false
+  become: false
+  tasks:
+    - name: Wait for all nodes to reach Ready
+      command: >
+        kubectl wait --for=condition=Ready nodes --all --timeout=120s
+      register: wait_result
+      until: wait_result.rc == 0
+      retries: 8
+      delay: 15
+      changed_when: false

@@ -1,0 +1,3 @@
+- import_playbook: 01_prereqs.yaml
+- import_playbook: 02_init_controlplane.yaml
+- import_playbook: 03_join_workers.yaml

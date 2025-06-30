@@ -1,0 +1,7 @@
+*.cfg
+*.retry
+.cache
+inventory.yaml
+
+# VSCode
+settings.json
